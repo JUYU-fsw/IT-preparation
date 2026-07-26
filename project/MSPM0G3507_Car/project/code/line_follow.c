@@ -13,9 +13,9 @@ static float line_follow_limit (float value, float limit)
     return value;
 }
 
-static int16 line_follow_abs_i16 (int16 value)
+static float line_follow_abs_float (float value)
 {
-    return (value < 0) ? (int16)-value : value;
+    return (value < 0.0f) ? -value : value;
 }
 
 static void line_follow_set_sharp_targets (line_follow_mode_enum mode,
@@ -36,12 +36,15 @@ static void line_follow_set_sharp_targets (line_follow_mode_enum mode,
 
 void line_follow_init (line_follow_struct *follow)
 {
+    follow->filtered_error = 0.0f;
     follow->previous_error = 0;
+    follow->filtered_derivative = 0.0f;
     follow->last_valid_error = 0;
     follow->sharp_left_ticks = 0;
     follow->sharp_right_ticks = 0;
     follow->sharp_release_ticks = 0;
     follow->lost_ticks = 0;
+    follow->abnormal_ticks = 0;
     follow->mode = LINE_FOLLOW_MODE_NORMAL;
     follow->base_rpm = LINE_FOLLOW_STRAIGHT_RPM;
     follow->correction_rpm = 0.0f;
@@ -52,12 +55,39 @@ void line_follow_update (line_follow_struct *follow,
                          float *left_target_rpm,
                          float *right_target_rpm)
 {
-    int16 error_delta;
-    int16 curve_strength;
+    float raw_derivative;
+    float curve_strength;
     uint8 left_edge;
     uint8 right_edge;
     float requested_base_rpm;
     float correction;
+
+    if(LINE_SENSOR_STATE_ALL_BLACK == sensor->state)
+    {
+        if(follow->abnormal_ticks < 255U)
+        {
+            follow->abnormal_ticks ++;
+        }
+        follow->correction_rpm = 0.0f;
+        if(follow->abnormal_ticks <= LINE_FOLLOW_ALL_BLACK_HOLD_TICKS)
+        {
+            /*
+             * A short all-black flash can be a reflection or floor texture.
+             * Creep straight briefly; a persistent all-black reading is unsafe.
+             */
+            follow->mode = LINE_FOLLOW_MODE_ALL_BLACK;
+            *left_target_rpm = LINE_FOLLOW_ALL_BLACK_CREEP_RPM;
+            *right_target_rpm = LINE_FOLLOW_ALL_BLACK_CREEP_RPM;
+        }
+        else
+        {
+            follow->mode = LINE_FOLLOW_MODE_LOST_STOP;
+            *left_target_rpm = 0.0f;
+            *right_target_rpm = 0.0f;
+        }
+        return;
+    }
+    follow->abnormal_ticks = 0;
 
     if(!sensor->line_valid)
     {
@@ -87,6 +117,7 @@ void line_follow_update (line_follow_struct *follow,
             *right_target_rpm = 0.0f;
         }
         follow->correction_rpm = 0.0f;
+        follow->filtered_derivative = 0.0f;
         return;
     }
 
@@ -141,7 +172,9 @@ void line_follow_update (line_follow_struct *follow,
             {
                 follow->mode = LINE_FOLLOW_MODE_NORMAL;
                 follow->sharp_release_ticks = 0;
-                follow->previous_error = sensor->error;
+                follow->filtered_error = (float)sensor->error;
+                follow->previous_error = follow->filtered_error;
+                follow->filtered_derivative = 0.0f;
             }
         }
         else
@@ -165,12 +198,26 @@ void line_follow_update (line_follow_struct *follow,
         follow->mode = LINE_FOLLOW_MODE_NORMAL;
     }
 
-    error_delta = sensor->error - follow->previous_error;
-    curve_strength = line_follow_abs_i16(sensor->error)
-                   + (int16)(LINE_FOLLOW_SPEED_DERROR_GAIN
-                             * line_follow_abs_i16(error_delta));
+    /*
+     * The sensor is binary, so its centroid moves in 50/100 point steps.
+     * Filter the position and derivative separately before feeding the PD.
+     */
+    follow->filtered_error += LINE_FOLLOW_ERROR_FILTER_ALPHA
+                            * ((float)sensor->error - follow->filtered_error);
+    raw_derivative = follow->filtered_error - follow->previous_error;
+    raw_derivative = line_follow_limit(raw_derivative,
+                                       LINE_FOLLOW_DERROR_LIMIT);
+    follow->filtered_derivative += LINE_FOLLOW_D_FILTER_ALPHA
+                                 * (raw_derivative
+                                    - follow->filtered_derivative);
+
+    curve_strength = line_follow_abs_float(follow->filtered_error)
+                   + LINE_FOLLOW_SPEED_DERROR_GAIN
+                     * line_follow_abs_float(follow->filtered_derivative);
     requested_base_rpm = LINE_FOLLOW_STRAIGHT_RPM
                        - LINE_FOLLOW_SPEED_ERROR_GAIN * curve_strength;
+    requested_base_rpm -= LINE_FOLLOW_LOW_CONFIDENCE_PENALTY
+                        * (100.0f - (float)sensor->confidence) / 100.0f;
     if(requested_base_rpm < LINE_FOLLOW_MIN_CURVE_RPM)
     {
         requested_base_rpm = LINE_FOLLOW_MIN_CURVE_RPM;
@@ -190,8 +237,8 @@ void line_follow_update (line_follow_struct *follow,
         }
     }
 
-    correction = LINE_FOLLOW_KP * sensor->error
-               + LINE_FOLLOW_KD * error_delta;
+    correction = LINE_FOLLOW_KP * follow->filtered_error
+               + LINE_FOLLOW_KD * follow->filtered_derivative;
     correction = line_follow_limit(correction,
                                     LINE_FOLLOW_CORRECTION_MAX_RPM);
 
@@ -210,6 +257,6 @@ void line_follow_update (line_follow_struct *follow,
         *right_target_rpm = follow->base_rpm;
     }
 
-    follow->previous_error = sensor->error;
+    follow->previous_error = follow->filtered_error;
     follow->correction_rpm = correction;
 }

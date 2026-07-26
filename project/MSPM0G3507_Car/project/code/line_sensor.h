@@ -18,12 +18,28 @@
 /* The existing module was verified as black-line active high. */
 #define LINE_SENSOR_ACTIVE_LEVEL        (1)
 #define LINE_SENSOR_SETTLE_US           (5)
+#define LINE_SENSOR_FILTER_SAMPLES      (3)
+#define LINE_SENSOR_NORMAL_MAX_WIDTH    (3)
+
+typedef enum
+{
+    LINE_SENSOR_STATE_LOST = 0,
+    LINE_SENSOR_STATE_NORMAL,
+    LINE_SENSOR_STATE_WIDE,
+    LINE_SENSOR_STATE_ALL_BLACK,
+    LINE_SENSOR_STATE_NOISY,
+} line_sensor_state_enum;
 
 typedef struct
 {
-    uint8 mask;          /* bit0=leftmost sensor, bit7=rightmost sensor */
+    uint8 raw_mask;      /* current unfiltered sample */
+    uint8 filtered_mask; /* 3-sample majority result */
+    uint8 mask;          /* selected continuous line segment */
     uint8 active_count;
+    uint8 segment_count;
+    uint8 confidence;    /* 0 ... 100 */
     uint8 line_valid;
+    line_sensor_state_enum state;
     int16 error;         /* -350(left) ... 0(center) ... +350(right) */
 } line_sensor_data_struct;
 

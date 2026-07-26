@@ -54,6 +54,12 @@ static void car_log_write (const char *text)
     uart_write_string(UART_3, text);
 }
 
+// 长运行诊断只走 115200 UART1，避免 9600 HC-05 阻塞高速控制循环。
+static void car_debug_write (const char *text)
+{
+    uart_write_string(UART_1, text);
+}
+
 // 查询 HC-05 命令。返回 1=START，-1=STOP，0=无完整有效命令。
 static int8 car_bluetooth_query_command (void)
 {
@@ -236,6 +242,8 @@ int main (void)
 {
     uint8 heartbeat_divider = 0;
     uint8 pid_log_divider = 0;
+    uint8 oled_debug_divider = 0;
+    uint8 oled_debug_page = 0;
     uint8 line_follow_running = 0;
     int8 bluetooth_command = 0;
     uint16 control_tick = 0;
@@ -254,7 +262,8 @@ int main (void)
     speed_pid_struct motor2_pid;
     line_sensor_data_struct line_sensor;
     line_follow_struct line_follow;
-    char uart_log[128];
+    char uart_log[192];
+    char oled_line[24];
 
     clock_init(SYSTEM_CLOCK_80M);   // 时钟配置及系统初始化<务必保留>
 
@@ -292,7 +301,7 @@ int main (void)
     car_oled_show_string(2, "IMU: DISABLED");
     car_oled_show_string(4, "MODE: LINE FOLLOW");
     car_oled_show_string(6, "SEND 1 TO START");
-    car_log_write("PID gains: M1[10,0.5,0] M2[10,0.5,0].\r\n");
+    car_log_write("PID gains: M1[10,1,0] M2[10,1,0].\r\n");
     car_log_write("UART1=115200, HC-05 UART3(PB2/PB3)=9600.\r\n");
     car_log_write("Gray pins: A0=PB25 A1=PB18 A2=PB21 OUT=PB22.\r\n");
     car_log_write("Send 1: wait 3 s, then follow line continuously.\r\n");
@@ -315,6 +324,7 @@ int main (void)
             motor2_target_rpm = 0.0f;
             speed_pid_set_target(&motor1_pid, 0.0f);
             speed_pid_set_target(&motor2_pid, 0.0f);
+            line_follow_init(&line_follow);
             tb6612_stop_all();
             car_log_write("ACK STOP: motors stopped.\r\n");
         }
@@ -326,6 +336,7 @@ int main (void)
             motor2_target_rpm = 0.0f;
             speed_pid_set_target(&motor1_pid, 0.0f);
             speed_pid_set_target(&motor2_pid, 0.0f);
+            line_follow_init(&line_follow);
             motor1_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR1);
             motor2_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR2);
             tb6612_stop_all();
@@ -339,7 +350,7 @@ int main (void)
             start_delay_tick ++;
         }
 
-        // 收到 START 后先等待 3 秒；巡线期间丢线立即把双轮目标清零。
+        // 收到 START 后先等待 3 秒；运行后由巡线状态机处理丢线和异常。
         if(!line_follow_running || (start_delay_tick < 300))
         {
             motor1_target_rpm = 0.0f;
@@ -388,20 +399,61 @@ int main (void)
             gpio_toggle_level(B16);
         }
 
+        oled_debug_divider ++;
+        if(10 <= oled_debug_divider)
+        {
+            oled_debug_divider = 0;
+            if(0U == oled_debug_page)
+            {
+                sprintf(oled_line, "R:%02X F:%02X S:%02X",
+                        line_sensor.raw_mask,
+                        line_sensor.filtered_mask,
+                        line_sensor.mask);
+            }
+            else if(1U == oled_debug_page)
+            {
+                sprintf(oled_line, "E:%4d FE:%4d Q:%3u",
+                        line_sensor.error,
+                        (int)line_follow.filtered_error,
+                        line_sensor.confidence);
+            }
+            else if(2U == oled_debug_page)
+            {
+                sprintf(oled_line, "M:%u ST:%u W:%u N:%u",
+                        (unsigned int)line_follow.mode,
+                        (unsigned int)line_sensor.state,
+                        line_sensor.active_count,
+                        line_sensor.segment_count);
+            }
+            else
+            {
+                sprintf(oled_line, "B:%3d C:%4d",
+                        (int)line_follow.base_rpm,
+                        (int)line_follow.correction_rpm);
+            }
+            car_oled_show_string((uint8)(oled_debug_page * 2U), oled_line);
+            oled_debug_page = (uint8)((oled_debug_page + 1U) & 0x03U);
+        }
+
         pid_log_divider ++;
         if(100 <= pid_log_divider)
         {
             pid_log_divider = 0;
             sprintf(uart_log,
-                    "LINE run=%u mode=%u mask=%02X err=%4d base=%3d corr=%4d target[L=%3d R=%3d] rpm100[L=%6ld R=%6ld]\r\n",
+                    "LINE run=%u mode=%u state=%u raw=%02X filt=%02X sel=%02X cnt=%u seg=%u q=%u err=%4d ferr=%4d derr=%4d base=%3d corr=%4d target[L=%3d R=%3d] rpm100[L=%6ld R=%6ld]\r\n",
                     line_follow_running, (unsigned int)line_follow.mode,
-                    line_sensor.mask, line_sensor.error,
+                    (unsigned int)line_sensor.state,
+                    line_sensor.raw_mask, line_sensor.filtered_mask,
+                    line_sensor.mask, line_sensor.active_count,
+                    line_sensor.segment_count, line_sensor.confidence,
+                    line_sensor.error, (int)line_follow.filtered_error,
+                    (int)line_follow.filtered_derivative,
                     (int)line_follow.base_rpm,
                     (int)line_follow.correction_rpm,
                     (int)motor1_target_rpm, (int)motor2_target_rpm,
                     (long)(motor1_pid.measured_rpm * 100.0f),
                     (long)(motor2_pid.measured_rpm * 100.0f));
-            car_log_write(uart_log);
+            car_debug_write(uart_log);
         }
     }
 }
