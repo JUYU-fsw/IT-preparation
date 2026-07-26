@@ -434,6 +434,36 @@
               <FileType>5</FileType>
               <FilePath>..\code\line_follow.h</FilePath>
             </File>
+            <File>
+              <FileName>angle_pid.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\angle_pid.c</FilePath>
+            </File>
+            <File>
+              <FileName>mpu6050_yaw.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\mpu6050_yaw.c</FilePath>
+            </File>
+            <File>
+              <FileName>odometer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\odometer.c</FilePath>
+            </File>
+            <File>
+              <FileName>angle_pid.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\angle_pid.h</FilePath>
+            </File>
+            <File>
+              <FileName>mpu6050_yaw.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\mpu6050_yaw.h</FilePath>
+            </File>
+            <File>
+              <FileName>odometer.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\odometer.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
