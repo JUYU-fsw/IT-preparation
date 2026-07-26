@@ -32,6 +32,9 @@
 #include "zf_common_headfile.h"
 #include "tb6612.h"
 #include "wheel_encoder.h"
+#include "speed_pid.h"
+#include "line_sensor.h"
+#include "line_follow.h"
 // 打开新的工程或者工程移动了位置务必执行以下操作
 // 第一步 关闭上面所有打开的文件
 // 第二步 project->clean  等待下方进度条走完
@@ -43,7 +46,83 @@
 // **************************** 代码区域 ****************************
 
 static soft_iic_info_struct oled_iic;
-static soft_iic_info_struct mpu6050_iic;
+
+// UART1 保留有线调试，UART3(PB2/PB3)连接板载 UART4 接口上的 HC-05。
+static void car_log_write (const char *text)
+{
+    uart_write_string(UART_1, text);
+    uart_write_string(UART_3, text);
+}
+
+// 查询 HC-05 命令。返回 1=START，-1=STOP，0=无完整有效命令。
+static int8 car_bluetooth_query_command (void)
+{
+    static char command[16];
+    static uint8 command_length = 0;
+    uint8 data;
+
+    while(uart_query_byte(UART_3, &data))
+    {
+        // 单字节命令优先处理，避免低速串口连续字符串超过接收 FIFO。
+        if('1' == data)
+        {
+            command_length = 0;
+            return 1;
+        }
+        if('0' == data)
+        {
+            command_length = 0;
+            return -1;
+        }
+
+        if(('\r' == data) || ('\n' == data))
+        {
+            if(0 == command_length)
+            {
+                continue;
+            }
+
+            command[command_length] = '\0';
+            command_length = 0;
+            if(0 == strcmp(command, "START"))
+            {
+                return 1;
+            }
+            if(0 == strcmp(command, "STOP"))
+            {
+                return -1;
+            }
+            car_log_write("Unknown command. Use 1=START or 0=STOP.\r\n");
+        }
+        else if(command_length < (sizeof(command) - 1))
+        {
+            if((data >= 'a') && (data <= 'z'))
+            {
+                data = (uint8)(data - 'a' + 'A');
+            }
+            command[command_length] = (char)data;
+            command_length ++;
+            command[command_length] = '\0';
+
+            // 蓝牙终端可能不发送回车；收到完整关键字后立即执行。
+            if(0 == strcmp(command, "START"))
+            {
+                command_length = 0;
+                return 1;
+            }
+            if(0 == strcmp(command, "STOP"))
+            {
+                command_length = 0;
+                return -1;
+            }
+        }
+        else
+        {
+            command_length = 0;
+        }
+    }
+    return 0;
+}
 
 // SSD1306 I2C 控制字：0x00 表示后续字节为命令。
 static void car_oled_write_command (uint8 command)
@@ -153,58 +232,35 @@ static void car_oled_init (void)
     car_oled_fill(0xAA);
 }
 
-static void car_imu_read_raw (uint8 data[14],
-                              int16 *accel_x, int16 *accel_y, int16 *accel_z,
-                              int16 *gyro_x, int16 *gyro_y, int16 *gyro_z)
-{
-    soft_iic_read_8bit_registers(&mpu6050_iic, 0x3B, data, 14);
-    *accel_x = (int16)(((uint16)data[0]  << 8) | data[1]);
-    *accel_y = (int16)(((uint16)data[2]  << 8) | data[3]);
-    *accel_z = (int16)(((uint16)data[4]  << 8) | data[5]);
-    *gyro_x  = (int16)(((uint16)data[8]  << 8) | data[9]);
-    *gyro_y  = (int16)(((uint16)data[10] << 8) | data[11]);
-    *gyro_z  = (int16)(((uint16)data[12] << 8) | data[13]);
-}
-
 int main (void)
 {
     uint8 heartbeat_divider = 0;
-    uint8 imu_log_divider = 0;
-    uint8 mpu6050_who_am_i = 0;
-    uint8 imu_raw[14];
-    uint16 calibration_sample = 0;
-    int16 accel_x = 0;
-    int16 accel_y = 0;
-    int16 accel_z = 0;
-    int16 gyro_x = 0;
-    int16 gyro_y = 0;
-    int16 gyro_z = 0;
-    int32 accel_x_sum = 0;
-    int32 accel_y_sum = 0;
-    int32 accel_z_sum = 0;
-    int32 gyro_x_sum = 0;
-    int32 gyro_y_sum = 0;
-    int32 gyro_z_sum = 0;
-    int16 accel_x_bias = 0;
-    int16 accel_y_bias = 0;
-    int16 accel_z_bias = 0;
-    int16 gyro_x_bias = 0;
-    int16 gyro_y_bias = 0;
-    int16 gyro_z_bias = 0;
+    uint8 pid_log_divider = 0;
+    uint8 line_follow_running = 0;
+    int8 bluetooth_command = 0;
+    uint16 control_tick = 0;
+    uint16 start_delay_tick = 0;
     int32 motor1_encoder_count = 0;
     int32 motor2_encoder_count = 0;
-    uint32 motor1_edge_a = 0;
-    uint32 motor1_edge_b = 0;
-    uint32 motor2_edge_a = 0;
-    uint32 motor2_edge_b = 0;
-    uint8 motor1_ab = 0;
-    uint8 motor2_ab = 0;
+    int32 motor1_encoder_previous = 0;
+    int32 motor2_encoder_previous = 0;
+    int32 motor1_encoder_delta = 0;
+    int32 motor2_encoder_delta = 0;
+    int16 motor1_duty = 0;
+    int16 motor2_duty = 0;
+    float motor1_target_rpm = 0.0f;
+    float motor2_target_rpm = 0.0f;
+    speed_pid_struct motor1_pid;
+    speed_pid_struct motor2_pid;
+    line_sensor_data_struct line_sensor;
+    line_follow_struct line_follow;
     char uart_log[128];
 
     clock_init(SYSTEM_CLOCK_80M);   // 时钟配置及系统初始化<务必保留>
 
-    // MPU6050 占用 PA0/PA1，因此调试串口迁移到载板 UART1。
+    // UART1：有线调试；UART3：板载 UART4 接口，连接 HC-05。
     uart_init(UART_1, 115200, UART1_TX_B6, UART1_RX_B7);
+    uart_init(UART_3, 9600, UART3_TX_B2, UART3_RX_B3);
 
     // 按终版载板测试要求，使用 PB16 作为 GPIO 心跳输出。
     // 使用翻转方式测试，不依赖外接 LED 是高电平点亮还是低电平点亮。
@@ -214,116 +270,138 @@ int main (void)
     // 默认输出高电平，确保蜂鸣器关闭。
     gpio_init(A7, GPO, 1, GPO_PUSH_PULL);
 
-    // 电机底层已建立，但编译期安全锁保持关闭，PWM 永远为 0。
+    // 外层工程切换为自有电机，速度换算固定采用商家给出的 2450 count/rev。
     tb6612_init();
     wheel_encoder_init();
+    speed_pid_init(&motor1_pid);
+    speed_pid_init(&motor2_pid);
+    line_sensor_init();
+    line_follow_init(&line_follow);
 
     car_oled_init();
 
-    // MPU6050：AD0 接地，7 位地址为 0x68；载板 SCL=PA1、SDA=PA0。
-    soft_iic_init(&mpu6050_iic, 0x68, 10, A1, A0);
-    system_delay_ms(100);
-    soft_iic_write_8bit_register(&mpu6050_iic, 0x6B, 0x00);  // 退出睡眠
-    soft_iic_write_8bit_register(&mpu6050_iic, 0x19, 0x07);  // 1 kHz / (1 + 7) = 125 Hz
-    soft_iic_write_8bit_register(&mpu6050_iic, 0x1A, 0x03);  // 数字低通滤波
-    soft_iic_write_8bit_register(&mpu6050_iic, 0x1B, 0x00);  // 陀螺仪 ±250 dps
-    soft_iic_write_8bit_register(&mpu6050_iic, 0x1C, 0x00);  // 加速度计 ±2 g
-    soft_iic_write_8bit_register(&mpu6050_iic, 0x1D, 0x03);  // MPU-6500 加速度低通滤波
-    system_delay_ms(50);
-
-    mpu6050_who_am_i = soft_iic_read_8bit_register(&mpu6050_iic, 0x75);
-    sprintf(uart_log, "IMU detected: WHO_AM_I=0x%02X (0x70=MPU-6500), I2C address=0x68.\r\n",
-            mpu6050_who_am_i);
-    uart_write_string(UART_1, uart_log);
-
-    // 上电零偏校准：此阶段必须保持模块水平、静止。
-    uart_write_string(UART_1, "IMU calibration: keep the car LEVEL and STILL for 4 seconds.\r\n");
-    for(calibration_sample = 0; calibration_sample < 500; calibration_sample ++)
-    {
-        car_imu_read_raw(imu_raw, &accel_x, &accel_y, &accel_z,
-                         &gyro_x, &gyro_y, &gyro_z);
-        accel_x_sum += accel_x;
-        accel_y_sum += accel_y;
-        accel_z_sum += accel_z;
-        gyro_x_sum += gyro_x;
-        gyro_y_sum += gyro_y;
-        gyro_z_sum += gyro_z;
-        system_delay_ms(8);
-    }
-
-    accel_x_bias = (int16)(accel_x_sum / 500);
-    accel_y_bias = (int16)(accel_y_sum / 500);
-    accel_z_bias = (int16)((accel_z_sum / 500) - 16384);
-    gyro_x_bias = (int16)(gyro_x_sum / 500);
-    gyro_y_bias = (int16)(gyro_y_sum / 500);
-    gyro_z_bias = (int16)(gyro_z_sum / 500);
-
-    sprintf(uart_log, "BIAS ACC[%d,%d,%d] GYRO[%d,%d,%d]\r\n",
-            accel_x_bias, accel_y_bias, accel_z_bias,
-            gyro_x_bias, gyro_y_bias, gyro_z_bias);
-    uart_write_string(UART_1, uart_log);
-
-    // 校准完成提示：低电平触发蜂鸣器，短鸣一次后保持关闭。
+    // PID 测试阶段停用 MPU-6500；保留原 PA7 低电平短鸣提示。
     gpio_set_level(A7, 0);
     system_delay_ms(200);
     gpio_set_level(A7, 1);
-    uart_write_string(UART_1, "IMU calibration complete.\r\n");
+    car_log_write("Line following ready. IMU disabled.\r\n");
 
     // OLED 从测试图案切换为后续开发使用的状态界面。
     car_oled_fill(0x00);
     car_oled_show_string(0, "TI CAR READY");
-    car_oled_show_string(2, "IMU: MPU-6500");
-    car_oled_show_string(4, "CALIBRATION: OK");
-    car_oled_show_string(6, "ENCODER: READY");
-    uart_write_string(UART_1, "TB6612 initialized: output safety lock is ON, PWM=0.\r\n");
-    uart_write_string(UART_1, "Encoder test: turn MOTOR1 and MOTOR2 wheels by hand.\r\n");
+    car_oled_show_string(2, "IMU: DISABLED");
+    car_oled_show_string(4, "MODE: LINE FOLLOW");
+    car_oled_show_string(6, "SEND 1 TO START");
+    car_log_write("PID gains: M1[10,0.5,0] M2[10,0.5,0].\r\n");
+    car_log_write("UART1=115200, HC-05 UART3(PB2/PB3)=9600.\r\n");
+    car_log_write("Gray pins: A0=PB25 A1=PB18 A2=PB21 OUT=PB22.\r\n");
+    car_log_write("Send 1: wait 3 s, then follow line continuously.\r\n");
+    car_log_write("Send 0 at any time for immediate motor stop.\r\n");
+
+    motor1_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR1);
+    motor2_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR2);
 
     while(true)
     {
-        system_delay_ms(500);
+        system_delay_ms(SPEED_PID_BASE_PERIOD_MS);
+        control_tick ++;
+
+        bluetooth_command = car_bluetooth_query_command();
+        if(bluetooth_command < 0)
+        {
+            line_follow_running = 0;
+            start_delay_tick = 0;
+            motor1_target_rpm = 0.0f;
+            motor2_target_rpm = 0.0f;
+            speed_pid_set_target(&motor1_pid, 0.0f);
+            speed_pid_set_target(&motor2_pid, 0.0f);
+            tb6612_stop_all();
+            car_log_write("ACK STOP: motors stopped.\r\n");
+        }
+        else if(bluetooth_command > 0)
+        {
+            line_follow_running = 1;
+            start_delay_tick = 0;
+            motor1_target_rpm = 0.0f;
+            motor2_target_rpm = 0.0f;
+            speed_pid_set_target(&motor1_pid, 0.0f);
+            speed_pid_set_target(&motor2_pid, 0.0f);
+            motor1_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR1);
+            motor2_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR2);
+            tb6612_stop_all();
+            car_log_write("ACK START: 3 s safety delay.\r\n");
+        }
+
+        line_sensor_read(&line_sensor);
+
+        if(line_follow_running && (start_delay_tick < 300))
+        {
+            start_delay_tick ++;
+        }
+
+        // 收到 START 后先等待 3 秒；巡线期间丢线立即把双轮目标清零。
+        if(!line_follow_running || (start_delay_tick < 300))
+        {
+            motor1_target_rpm = 0.0f;
+            motor2_target_rpm = 0.0f;
+        }
+        else
+        {
+            line_follow_update(&line_follow, &line_sensor,
+                               &motor1_target_rpm, &motor2_target_rpm);
+        }
+
+        speed_pid_set_target(&motor1_pid, motor1_target_rpm);
+        speed_pid_set_target(&motor2_pid, motor2_target_rpm);
+
+        if(0 == (control_tick % SPEED_PID_CONTROL_DIVIDER))
+        {
+            motor1_encoder_count = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR1);
+            motor2_encoder_count = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR2);
+
+            motor1_encoder_delta = SPEED_PID_MOTOR1_ENCODER_SIGN
+                                 * (motor1_encoder_count - motor1_encoder_previous);
+            motor2_encoder_delta = SPEED_PID_MOTOR2_ENCODER_SIGN
+                                 * (motor2_encoder_count - motor2_encoder_previous);
+            motor1_encoder_previous = motor1_encoder_count;
+            motor2_encoder_previous = motor2_encoder_count;
+
+            motor1_duty = speed_pid_update(&motor1_pid, motor1_encoder_delta,
+                                           SPEED_PID_MOTOR1_KP,
+                                           SPEED_PID_MOTOR1_KI,
+                                           SPEED_PID_MOTOR1_KD);
+            motor2_duty = speed_pid_update(&motor2_pid, motor2_encoder_delta,
+                                           SPEED_PID_MOTOR2_KP,
+                                           SPEED_PID_MOTOR2_KI,
+                                           SPEED_PID_MOTOR2_KD);
+            // 右轮：TB6612 A + MOTOR2 编码器；左轮：TB6612 B + MOTOR1(PA25/PA14)。
+            tb6612_set_motor(TB6612_MOTOR_A,
+                             SPEED_PID_TB6612_A_FORWARD_SIGN * motor2_duty);
+            tb6612_set_motor(TB6612_MOTOR_B,
+                             SPEED_PID_TB6612_B_FORWARD_SIGN * motor1_duty);
+        }
+
         heartbeat_divider ++;
-        if(1 <= heartbeat_divider)
+        if(50 <= heartbeat_divider)
         {
             heartbeat_divider = 0;
             gpio_toggle_level(B16);
         }
 
-        imu_log_divider ++;
-        if(2 <= imu_log_divider)
+        pid_log_divider ++;
+        if(100 <= pid_log_divider)
         {
-            imu_log_divider = 0;
-            // MPU-6500 数据寄存器从 0x3B 开始，按高字节在前连续读取。
-            car_imu_read_raw(imu_raw, &accel_x, &accel_y, &accel_z,
-                             &gyro_x, &gyro_y, &gyro_z);
-            accel_x -= accel_x_bias;
-            accel_y -= accel_y_bias;
-            accel_z -= accel_z_bias;
-            gyro_x -= gyro_x_bias;
-            gyro_y -= gyro_y_bias;
-            gyro_z -= gyro_z_bias;
-
-            sprintf(uart_log, "CAL ACC[%6d,%6d,%6d] GYRO[%6d,%6d,%6d]\r\n",
-                    accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
-            uart_write_string(UART_1, uart_log);
-
-            motor1_encoder_count = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR1);
-            motor2_encoder_count = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR2);
-            sprintf(uart_log, "ENC MOTOR1=%ld MOTOR2=%ld\r\n",
-                    (long)motor1_encoder_count, (long)motor2_encoder_count);
-            uart_write_string(UART_1, uart_log);
-
-            motor1_edge_a = wheel_encoder_get_edge_count(WHEEL_ENCODER_MOTOR1, 0);
-            motor1_edge_b = wheel_encoder_get_edge_count(WHEEL_ENCODER_MOTOR1, 1);
-            motor2_edge_a = wheel_encoder_get_edge_count(WHEEL_ENCODER_MOTOR2, 0);
-            motor2_edge_b = wheel_encoder_get_edge_count(WHEEL_ENCODER_MOTOR2, 1);
-            motor1_ab = wheel_encoder_get_state(WHEEL_ENCODER_MOTOR1);
-            motor2_ab = wheel_encoder_get_state(WHEEL_ENCODER_MOTOR2);
-            sprintf(uart_log, "EDGE M1[A=%lu B=%lu AB=%u%u] M2[A=%lu B=%lu AB=%u%u]\r\n",
-                    (unsigned long)motor1_edge_a, (unsigned long)motor1_edge_b,
-                    (motor1_ab >> 1) & 1, motor1_ab & 1,
-                    (unsigned long)motor2_edge_a, (unsigned long)motor2_edge_b,
-                    (motor2_ab >> 1) & 1, motor2_ab & 1);
-            uart_write_string(UART_1, uart_log);
+            pid_log_divider = 0;
+            sprintf(uart_log,
+                    "LINE run=%u mode=%u mask=%02X err=%4d base=%3d corr=%4d target[L=%3d R=%3d] rpm100[L=%6ld R=%6ld]\r\n",
+                    line_follow_running, (unsigned int)line_follow.mode,
+                    line_sensor.mask, line_sensor.error,
+                    (int)line_follow.base_rpm,
+                    (int)line_follow.correction_rpm,
+                    (int)motor1_target_rpm, (int)motor2_target_rpm,
+                    (long)(motor1_pid.measured_rpm * 100.0f),
+                    (long)(motor2_pid.measured_rpm * 100.0f));
+            car_log_write(uart_log);
         }
     }
 }

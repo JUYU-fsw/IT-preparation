@@ -1,5 +1,6 @@
-./objects/main.o: ..\user\src\main.c \
-  ..\..\libraries\zf_common\zf_common_headfile.h \
+./objects/line_follow.o: ..\code\line_follow.c ..\code\line_follow.h \
+  ..\..\libraries\zf_common\zf_common_typedef.h ..\code\line_sensor.h \
+  ..\..\libraries\zf_driver\zf_driver_gpio.h \
   ..\..\libraries\sdk\ti_config\ti_msp_dl_config.h \
   ..\..\libraries\sdk\ti\devices\msp\msp.h \
   ..\..\libraries\sdk\ti\devices\DeviceFamily.h \
@@ -73,46 +74,4 @@
   ..\..\libraries\sdk\ti\driverlib\dl_vref.h \
   ..\..\libraries\sdk\ti\driverlib\dl_wwdt.h \
   ..\..\libraries\sdk\ti\driverlib\m0p\dl_interrupt.h \
-  ..\..\libraries\sdk\ti\driverlib\m0p\dl_systick.h \
-  ..\..\libraries\zf_common\zf_common_typedef.h \
-  ..\..\libraries\zf_common\zf_common_clock.h \
-  ..\..\libraries\zf_common\zf_common_debug.h \
-  ..\..\libraries\zf_common\zf_common_fifo.h \
-  ..\..\libraries\zf_common\zf_common_font.h \
-  ..\..\libraries\zf_common\zf_common_function.h \
-  ..\..\libraries\zf_common\zf_common_interrupt.h \
-  ..\..\libraries\zf_driver\zf_driver_adc.h \
-  ..\..\libraries\zf_driver\zf_driver_gpio.h \
-  ..\..\libraries\zf_driver\zf_driver_delay.h \
-  ..\..\libraries\zf_driver\zf_driver_exti.h \
-  ..\..\libraries\zf_driver\zf_driver_flash.h \
-  ..\..\libraries\zf_driver\zf_driver_pit.h \
-  ..\..\libraries\zf_driver\zf_driver_timer.h \
-  ..\..\libraries\zf_driver\zf_driver_pwm.h \
-  ..\..\libraries\zf_driver\zf_driver_soft_iic.h \
-  ..\..\libraries\zf_driver\zf_driver_spi.h \
-  ..\..\libraries\zf_driver\zf_driver_uart.h \
-  ..\..\libraries\zf_driver\zf_driver_encoder.h \
-  ..\..\libraries\zf_device\zf_device_absolute_encoder.h \
-  ..\..\libraries\zf_device\zf_device_oled.h \
-  ..\..\libraries\zf_device\zf_device_tft180.h \
-  ..\..\libraries\zf_device\zf_device_ips114.h \
-  ..\..\libraries\zf_device\zf_device_ips200.h \
-  ..\..\libraries\zf_device\zf_device_ips200pro.h \
-  ..\..\libraries\zf_device\zf_device_imu660ra.h \
-  ..\..\libraries\zf_device\zf_device_imu963ra.h \
-  ..\..\libraries\zf_device\zf_device_imu660rb.h \
-  ..\..\libraries\zf_device\zf_device_imu660rc.h \
-  ..\..\libraries\zf_device\zf_device_type.h \
-  ..\..\libraries\zf_device\zf_device_wifi_uart.h \
-  ..\..\libraries\zf_device\zf_device_wifi_spi.h \
-  ..\..\libraries\zf_device\zf_device_tsl1401.h \
-  ..\..\libraries\zf_device\zf_device_dl1b.h \
-  ..\..\libraries\zf_device\zf_device_dl1a.h \
-  ..\..\libraries\zf_device\zf_device_wireless_uart.h \
-  ..\..\libraries\zf_device\zf_device_key.h \
-  ..\..\libraries\zf_device\zf_device_gs08ra.h \
-  ..\..\libraries\zf_components\seekfree_assistant.h \
-  ..\..\libraries\zf_components\seekfree_assistant_interface.h \
-  ..\code\tb6612.h ..\code\wheel_encoder.h ..\code\speed_pid.h \
-  ..\code\line_sensor.h ..\code\line_follow.h
+  ..\..\libraries\sdk\ti\driverlib\m0p\dl_systick.h

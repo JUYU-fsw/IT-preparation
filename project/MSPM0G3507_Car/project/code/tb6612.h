@@ -9,8 +9,8 @@ typedef enum
     TB6612_MOTOR_B,
 } tb6612_motor_enum;
 
-// 主电源开关和供电链路验证完成前必须保持为 0。
-#define TB6612_OUTPUT_ENABLE    (0)
+// 主电源开关与供电链路已完成，允许外层工程进行架空 PID 测试。
+#define TB6612_OUTPUT_ENABLE    (1)
 
 #define TB6612_DUTY_MAX         (10000)
 #define TB6612_PWM_FREQUENCY    (20000)

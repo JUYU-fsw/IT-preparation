@@ -1,6 +1,9 @@
 --cpu Cortex-M0+
 ".\objects\tb6612.o"
 ".\objects\wheel_encoder.o"
+".\objects\speed_pid.o"
+".\objects\line_sensor.o"
+".\objects\line_follow.o"
 ".\objects\main.o"
 ".\objects\isr.o"
 ".\objects\zf_common_clock.o"

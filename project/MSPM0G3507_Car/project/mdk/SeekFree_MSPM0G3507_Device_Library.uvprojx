@@ -404,6 +404,36 @@
               <FileType>5</FileType>
               <FilePath>..\code\wheel_encoder.h</FilePath>
             </File>
+            <File>
+              <FileName>speed_pid.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\speed_pid.c</FilePath>
+            </File>
+            <File>
+              <FileName>speed_pid.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\speed_pid.h</FilePath>
+            </File>
+            <File>
+              <FileName>line_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\line_sensor.c</FilePath>
+            </File>
+            <File>
+              <FileName>line_sensor.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\line_sensor.h</FilePath>
+            </File>
+            <File>
+              <FileName>line_follow.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\line_follow.c</FilePath>
+            </File>
+            <File>
+              <FileName>line_follow.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code\line_follow.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
