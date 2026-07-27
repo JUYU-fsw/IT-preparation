@@ -407,7 +407,7 @@ int main (void)
     }
     car_log_write("PID: speed[10,1,0]; line/angle separated.\r\n");
     car_log_write("UART1=115200, HC-05 UART3(PB2/PB3)=9600.\r\n");
-    car_log_write("CMD 1=start 0=stop h=hold r=reset d=dist ?=help\r\n");
+    car_log_write("CMD:1 0 h r d ?\r\n");
 
     motor1_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR1);
     motor2_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR2);
@@ -428,8 +428,8 @@ int main (void)
             angle_diff_rpm      = 0.0f;
             stationary_hold_active = 0;
             angle_pid_reset(&angle_pid);
-            speed_pid_set_target(&motor1_pid, 0.0f);
-            speed_pid_set_target(&motor2_pid, 0.0f);
+            speed_pid_reset(&motor1_pid);
+            speed_pid_reset(&motor2_pid);
             tb6612_stop_all();
             car_log_write("OK STOP\r\n");
         }
@@ -443,8 +443,8 @@ int main (void)
             stationary_hold_active = 0;
             yaw_target = mpu6050_yaw_get_angle();  /* lock current heading */
             angle_pid_set_target(&angle_pid, yaw_target);
-            speed_pid_set_target(&motor1_pid, 0.0f);
-            speed_pid_set_target(&motor2_pid, 0.0f);
+            speed_pid_reset(&motor1_pid);
+            speed_pid_reset(&motor2_pid);
             motor1_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR1);
             motor2_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR2);
             tb6612_stop_all();
@@ -452,12 +452,25 @@ int main (void)
         }
         else if(2 == bluetooth_command)
         {
-            /* reset yaw to zero */
+            /*
+             * A plain angle reset does not remove gyro temperature drift.
+             * Stop first, then obtain a fresh stationary bias calibration.
+             */
+            line_follow_running = 0;
+            start_delay_tick = 0;
+            stationary_hold_active = 0;
+            motor1_target_rpm = 0.0f;
+            motor2_target_rpm = 0.0f;
+            speed_pid_reset(&motor1_pid);
+            speed_pid_reset(&motor2_pid);
+            tb6612_stop_all();
+            car_log_write("CAL KEEP STILL\r\n");
+            mpu6050_yaw_calibrate(MPU6500_CALIB_SAMPLES);
             mpu6050_yaw_set_angle(0.0f);
             yaw_target = 0.0f;
             angle_pid_reset(&angle_pid);
             angle_pid_set_target(&angle_pid, yaw_target);
-            car_log_write("OK RESET\r\n");
+            car_log_write("OK CAL YAW=0\r\n");
         }
         else if(3 == bluetooth_command)
         {
@@ -490,12 +503,24 @@ int main (void)
         }
         else if(5 == bluetooth_command)
         {
-            car_log_write("CMD 1=start 0=stop h=hold r=reset d=dist ?=help\r\n");
+            car_log_write("CMD:1 0 h r d ?\r\n");
         }
 
         /* ---- sensors ---- */
         line_sensor_read(&line_sensor);
-        mpu6050_yaw_update_fast();     /* ~0.15 ms, gyro-Z only */
+        /*
+         * While parked, use the full accel+gyro update so the stationary
+         * detector can track temperature-dependent gyro bias. During motor
+         * control use the shorter gyro-only read to keep the loop periodic.
+         */
+        if(!line_follow_running && !stationary_hold_active)
+        {
+            mpu6050_yaw_update();
+        }
+        else
+        {
+            mpu6050_yaw_update_fast();
+        }
         yaw_angle = mpu6050_yaw_get_angle();
 
         /* ---- 3 s safety delay ---- */
@@ -589,6 +614,9 @@ int main (void)
 
             /* OLED refresh every 500 ms */
             {
+                sprintf(uart_log, "L%+03d R%+03d",
+                        (int)motor1_target_rpm, (int)motor2_target_rpm);
+                car_oled_show_string(0, uart_log);
                 sprintf(uart_log, "YAW: %+6.1f", (double)yaw_angle);
                 car_oled_show_string(2, uart_log);
                 if (stationary_hold_active)
@@ -603,29 +631,36 @@ int main (void)
                 {
                     car_oled_show_string(4, "ANGL: OFF   ");
                 }
+                sprintf(uart_log, "R%u D%03u M%02X",
+                        line_follow_running,
+                        (unsigned int)(start_delay_tick / 10),
+                        line_sensor.mask);
+                car_oled_show_string(6, uart_log);
             }
         }
 
-        /* ---- 1 Hz serial log ---- */
+        /*
+         * 1 Hz Bluetooth log only while the motors are inactive.
+         * At 9600 baud a long blocking line pauses the control loop for
+         * roughly 100 ms, corrupting both speed control and yaw integration.
+         * Send STOP after a test and copy the resumed stationary logs.
+         */
         pid_log_divider ++;
         if(100 <= pid_log_divider)
         {
             pid_log_divider = 0;
-            sprintf(uart_log,
-                    "T who=%02X yaw=%+.1f rate=%+.1f run=%u hold=%u "
-                    "mode=%u mask=%02X err=%d tgt=%d,%d rpm=%ld,%ld odo=%.1f\r\n",
-                    mpu6050_yaw_read_who_am_i(),
-                    (double)yaw_angle,
-                    (double)mpu6050_yaw_get_rate_dps(),
-                    line_follow_running, stationary_hold_active,
-                    (unsigned int)line_follow.mode,
-                    line_sensor.mask,
-                    line_sensor.error,
-                    (int)motor1_target_rpm, (int)motor2_target_rpm,
-                    (long)(motor1_pid.measured_rpm * 100.0f),
-                    (long)(motor2_pid.measured_rpm * 100.0f),
-                    (double)odometer_get_cm(&odo));
-            car_debug_write(uart_log);
+            if(!line_follow_running && !stationary_hold_active)
+            {
+                sprintf(uart_log,
+                        "T w=%02X y=%+.1f r=%+.2f m=%02X e=%d odo=%.1f\r\n",
+                        mpu6050_yaw_read_who_am_i(),
+                        (double)yaw_angle,
+                        (double)mpu6050_yaw_get_rate_dps(),
+                        line_sensor.mask,
+                        line_sensor.error,
+                        (double)odometer_get_cm(&odo));
+                car_debug_write(uart_log);
+            }
         }
     }
 }
