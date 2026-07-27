@@ -1,4 +1,4 @@
-./objects/main.o: ..\user\src\main.c \
+./objects/mpu6050_yaw.o: ..\code\mpu6050_yaw.c \
   ..\..\libraries\zf_common\zf_common_headfile.h \
   ..\..\libraries\sdk\ti_config\ti_msp_dl_config.h \
   ..\..\libraries\sdk\ti\devices\msp\msp.h \
@@ -114,6 +114,4 @@
   ..\..\libraries\zf_device\zf_device_gs08ra.h \
   ..\..\libraries\zf_components\seekfree_assistant.h \
   ..\..\libraries\zf_components\seekfree_assistant_interface.h \
-  ..\code\tb6612.h ..\code\wheel_encoder.h ..\code\speed_pid.h \
-  ..\code\line_sensor.h ..\code\line_follow.h ..\code\mpu6050_yaw.h \
-  ..\code\angle_pid.h ..\code\odometer.h
+  ..\code\mpu6050_yaw.h
