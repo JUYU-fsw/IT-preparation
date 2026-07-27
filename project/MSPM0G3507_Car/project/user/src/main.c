@@ -48,10 +48,6 @@
 
 // **************************** 代码区域 ****************************
 
-/* ---- angle overlay blending weights ---- */
-#define ANGLE_OVERLAY_WEAK_GAIN     (0.25f)   /* normal line-follow: weak */
-#define ANGLE_OVERLAY_STRONG_GAIN   (1.00f)   /* off-line / hold: full   */
-
 static soft_iic_info_struct oled_iic;
 
 // UART1 保留有线调试，UART3(PB2/PB3)连接板载 UART4 接口上的 HC-05。
@@ -61,14 +57,16 @@ static void car_log_write (const char *text)
     uart_write_string(UART_3, text);
 }
 
-/* High-volume telemetry must not occupy the 9600-baud HC-05 link. */
+/* 1 Hz compact telemetry is sent to both UART1 and the HC-05. */
 static void car_debug_write (const char *text)
 {
     uart_write_string(UART_1, text);
+    uart_write_string(UART_3, text);
 }
 
 // 查询 HC-05 命令。
-// 返回 1=START, -1=STOP, 2=RESET_YAW, 3=ODO_QUERY, 4=STATIONARY_HOLD。
+// 返回 1=START, -1=STOP, 2=RESET_YAW, 3=ODO_QUERY,
+//      4=STATIONARY_HOLD, 5=HELP。
 static int8 car_bluetooth_query_command (void)
 {
     static char command[16];
@@ -103,6 +101,11 @@ static int8 car_bluetooth_query_command (void)
             command_length = 0;
             return 3;
         }
+        if('?' == data)
+        {
+            command_length = 0;
+            return 5;
+        }
 
         if(('\r' == data) || ('\n' == data))
         {
@@ -129,7 +132,11 @@ static int8 car_bluetooth_query_command (void)
             {
                 return 3;
             }
-            car_log_write("Unknown cmd. 1=START 0=STOP r=RESET d=DIST\r\n");
+            if(0 == strcmp(command, "HELP"))
+            {
+                return 5;
+            }
+            car_log_write("ERR CMD; send ?\r\n");
         }
         else if(command_length < (sizeof(command) - 1))
         {
@@ -161,6 +168,11 @@ static int8 car_bluetooth_query_command (void)
             {
                 command_length = 0;
                 return 3;
+            }
+            if(0 == strcmp(command, "HELP"))
+            {
+                command_length = 0;
+                return 5;
             }
         }
         else
@@ -309,12 +321,7 @@ int main (void)
     float mount_axis_x     = 0.0f;
     float mount_axis_y     = 0.0f;
     float mount_axis_z     = 1.0f;
-    float gyro_x_dps       = 0.0f;
-    float gyro_y_dps       = 0.0f;
-    float gyro_z_dps       = 0.0f;
-    uint8 yaw_hold_active  = 0;
     uint8 stationary_hold_active = 0;
-    uint8 was_line_valid   = 0;
     /*
      * Detailed IMU telemetry is longer than 128 bytes.  The old buffer
      * overflowed during sprintf and could corrupt Bluetooth/parser state.
@@ -377,7 +384,6 @@ int main (void)
 
     // 锁定当前航向为目标（0度）
     yaw_target      = 0.0f;
-    yaw_hold_active = 0;
     angle_pid_set_target(&angle_pid, yaw_target);
 
     // ---- startup status on OLED ----
@@ -386,7 +392,7 @@ int main (void)
     {
         car_oled_show_string(0, "TI CAR v2 IMU ON");
         car_oled_show_string(2, "YAW:   0.0 deg");
-        car_oled_show_string(4, "ANGL: WEAK ");
+        car_oled_show_string(4, "ANGL: MON  ");
         car_oled_show_string(6, "SEND 1 TO START");
         car_log_write("Angle-loop car ready. MPU6050/6500 yaw active.\r\n");
         car_log_write("Yaw scale=1.000; recalibrate for the new IMU.\r\n");
@@ -399,9 +405,9 @@ int main (void)
         car_oled_show_string(6, "CHECK MPU WIRES");
         car_log_write("Car ready with IMU fault; heading hold disabled.\r\n");
     }
-    car_log_write("PID: speed[10,1,0] angleW[0.5,0.01,0.1] angleS[2,0.05,0.3]\r\n");
+    car_log_write("PID: speed[10,1,0]; line/angle separated.\r\n");
     car_log_write("UART1=115200, HC-05 UART3(PB2/PB3)=9600.\r\n");
-    car_log_write("Send 1=start 0=stop h=park_hold r=reset_yaw d=dist.\r\n");
+    car_log_write("CMD 1=start 0=stop h=hold r=reset d=dist ?=help\r\n");
 
     motor1_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR1);
     motor2_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR2);
@@ -420,13 +426,12 @@ int main (void)
             motor1_target_rpm   = 0.0f;
             motor2_target_rpm   = 0.0f;
             angle_diff_rpm      = 0.0f;
-            yaw_hold_active     = 0;
             stationary_hold_active = 0;
             angle_pid_reset(&angle_pid);
             speed_pid_set_target(&motor1_pid, 0.0f);
             speed_pid_set_target(&motor2_pid, 0.0f);
             tb6612_stop_all();
-            car_log_write("ACK STOP: motors stopped.\r\n");
+            car_log_write("OK STOP\r\n");
         }
         else if(1 == bluetooth_command)
         {
@@ -435,7 +440,6 @@ int main (void)
             motor1_target_rpm   = 0.0f;
             motor2_target_rpm   = 0.0f;
             angle_diff_rpm      = 0.0f;
-            yaw_hold_active     = 0;
             stationary_hold_active = 0;
             yaw_target = mpu6050_yaw_get_angle();  /* lock current heading */
             angle_pid_set_target(&angle_pid, yaw_target);
@@ -444,7 +448,7 @@ int main (void)
             motor1_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR1);
             motor2_encoder_previous = wheel_encoder_get_count(WHEEL_ENCODER_MOTOR2);
             tb6612_stop_all();
-            car_log_write("ACK START: 3 s safety delay.\r\n");
+            car_log_write("OK START 3S\r\n");
         }
         else if(2 == bluetooth_command)
         {
@@ -453,7 +457,7 @@ int main (void)
             yaw_target = 0.0f;
             angle_pid_reset(&angle_pid);
             angle_pid_set_target(&angle_pid, yaw_target);
-            car_log_write("ACK RESET: yaw=0.\r\n");
+            car_log_write("OK RESET\r\n");
         }
         else if(3 == bluetooth_command)
         {
@@ -473,43 +477,26 @@ int main (void)
             {
                 stationary_hold_active = 0;
                 tb6612_stop_all();
-                car_log_write("NACK HOLD: IMU not ready.\r\n");
+                car_log_write("ERR HOLD IMU\r\n");
                 continue;
             }
             line_follow_running = 0;
             start_delay_tick = 0;
-            yaw_hold_active = 0;
             stationary_hold_active = 1;
             yaw_target = mpu6050_yaw_get_angle();
             angle_pid_reset(&angle_pid);
             angle_pid_set_target(&angle_pid, yaw_target);
-            car_log_write("ACK HOLD: stationary heading locked; send 0 to exit.\r\n");
+            car_log_write("OK HOLD; 0=EXIT\r\n");
+        }
+        else if(5 == bluetooth_command)
+        {
+            car_log_write("CMD 1=start 0=stop h=hold r=reset d=dist ?=help\r\n");
         }
 
         /* ---- sensors ---- */
         line_sensor_read(&line_sensor);
         mpu6050_yaw_update_fast();     /* ~0.15 ms, gyro-Z only */
         yaw_angle = mpu6050_yaw_get_angle();
-
-        /* ---- yaw lock state machine ---- */
-        if (line_sensor.line_valid && !was_line_valid)
-        {
-            /* line just reappeared: release angle hold, update target */
-            if (yaw_hold_active)
-            {
-                yaw_hold_active = 0;
-                yaw_target = yaw_angle;
-                angle_pid_set_target(&angle_pid, yaw_target);
-            }
-        }
-        else if (!line_sensor.line_valid && was_line_valid)
-        {
-            /* line just lost: lock current heading */
-            yaw_hold_active = 1;
-            yaw_target      = yaw_angle;
-            angle_pid_set_target(&angle_pid, yaw_target);
-        }
-        was_line_valid = line_sensor.line_valid;
 
         /* ---- 3 s safety delay ---- */
         if(line_follow_running && (start_delay_tick < 300))
@@ -548,33 +535,15 @@ int main (void)
         }
         else
         {
-            /* base targets from line following */
+            /*
+             * Line following exclusively owns both wheel targets.
+             * The former weak/strong yaw overlay fought the line controller
+             * and caused rapid left/right corrections on the track.
+             * Angle PID remains available only in explicit HOLD mode.
+             */
             line_follow_update(&line_follow, &line_sensor,
                                &motor1_target_rpm, &motor2_target_rpm);
-
-            /* ---- angle PID overlay ---- */
-            if (yaw_hold_active)
-            {
-                /* off-line: strong angle hold overrides line-follow targets */
-                angle_pid_set_target(&angle_pid, yaw_target);
-                angle_diff_rpm = angle_pid_update(&angle_pid, yaw_angle,
-                    ANGLE_PID_STRONG_KP, ANGLE_PID_STRONG_KI, ANGLE_PID_STRONG_KD,
-                    ANGLE_PID_STRONG_OUTPUT_MAX, ANGLE_PID_STRONG_INTEGRAL_MAX,
-                    0.010f);
-                motor1_target_rpm = -angle_diff_rpm;
-                motor2_target_rpm =  angle_diff_rpm;
-            }
-            else
-            {
-                /* on-line: weak overlay on top of line-follow targets */
-                angle_pid_set_target(&angle_pid, yaw_target);
-                angle_diff_rpm = angle_pid_update(&angle_pid, yaw_angle,
-                    ANGLE_PID_WEAK_KP, ANGLE_PID_WEAK_KI, ANGLE_PID_WEAK_KD,
-                    ANGLE_PID_WEAK_OUTPUT_MAX, ANGLE_PID_WEAK_INTEGRAL_MAX,
-                    0.010f);
-                motor1_target_rpm -= angle_diff_rpm * ANGLE_OVERLAY_WEAK_GAIN;
-                motor2_target_rpm += angle_diff_rpm * ANGLE_OVERLAY_WEAK_GAIN;
-            }
+            angle_diff_rpm = 0.0f;
         }
 
         speed_pid_set_target(&motor1_pid, motor1_target_rpm);
@@ -626,13 +595,9 @@ int main (void)
                 {
                     car_oled_show_string(4, "ANGL: PARK ");
                 }
-                else if (yaw_hold_active)
-                {
-                    car_oled_show_string(4, "ANGL: HOLD  ");
-                }
                 else if (line_follow_running)
                 {
-                    car_oled_show_string(4, "ANGL: WEAK  ");
+                    car_oled_show_string(4, "ANGL: MON   ");
                 }
                 else
                 {
@@ -646,25 +611,19 @@ int main (void)
         if(100 <= pid_log_divider)
         {
             pid_log_divider = 0;
-            mpu6050_yaw_get_gyro_dps(&gyro_x_dps, &gyro_y_dps, &gyro_z_dps);
             sprintf(uart_log,
-                    "IMU yaw=%+6.1f total=%+7.1f rate=%+6.1f dt=%4.1f tk=%lu "
-                    "gyro[%+5.1f,%+5.1f,%+5.1f] "
-                    "who=%02X run=%u park=%u mode=%u mask=%02X "
-                    "ae=%+5.1f ac=%+5.1f tgt[%3d,%3d] odo=%.1f\r\n",
-                    (double)yaw_angle,
-                    (double)mpu6050_yaw_get_total_angle(),
-                    (double)mpu6050_yaw_get_rate_dps(),
-                    (double)mpu6050_yaw_get_dt_ms(),
-                    (unsigned long)mpu6050_yaw_get_timer_ticks(),
-                    (double)gyro_x_dps, (double)gyro_y_dps,
-                    (double)gyro_z_dps,
+                    "T who=%02X yaw=%+.1f rate=%+.1f run=%u hold=%u "
+                    "mode=%u mask=%02X err=%d tgt=%d,%d rpm=%ld,%ld odo=%.1f\r\n",
                     mpu6050_yaw_read_who_am_i(),
+                    (double)yaw_angle,
+                    (double)mpu6050_yaw_get_rate_dps(),
                     line_follow_running, stationary_hold_active,
                     (unsigned int)line_follow.mode,
                     line_sensor.mask,
-                    (double)angle_pid.error, (double)angle_diff_rpm,
+                    line_sensor.error,
                     (int)motor1_target_rpm, (int)motor2_target_rpm,
+                    (long)(motor1_pid.measured_rpm * 100.0f),
+                    (long)(motor2_pid.measured_rpm * 100.0f),
                     (double)odometer_get_cm(&odo));
             car_debug_write(uart_log);
         }
